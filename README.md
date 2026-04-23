@@ -1,62 +1,158 @@
 # cashu-batch-mint
 
-Pay one Lightning invoice to a Cashu mint and receive many single-proof ecash tokens of a fixed denomination. Intended as the producer stage for a later QR-printing workflow.
+Two CLI tools that together turn a Lightning payment into a stack of printable ecash QR codes:
 
-## Install
+1. **`mint-batch`** — pay one Lightning invoice to a Cashu mint, receive many single-proof ecash tokens of a fixed denomination.
+2. **`tokens-to-qr`** — take a run directory of tokens and render one QR code image per token.
+
+Each produced token is one proof of one fixed amount (default 8,192 sat). Tokens are V4-encoded (`cashuB…`) with DLEQ stripped.
+
+## Setup
 
 ```bash
+cd cashu-batch-mint
 bun install
 ```
 
-## Usage
+Both CLIs live under `./bin/`.
+
+## `mint-batch`
+
+### Mint new tokens
 
 ```bash
-./bin/mint-batch --mint https://testnut.cashu.space --count 5
-# defaults: --amount 8192 --unit sat --out ./runs --poll-interval 2000
+./bin/mint-batch --mint <url> --count <n> [options]
 ```
 
-Each run creates `runs/<timestamp>-<mint-host>/` containing:
+Required flags:
 
-- `manifest.json` — run config, quote info, keyset, state machine
-- `preview.json` — persisted `MintPreview` (blinded outputs + secrets) — written BEFORE the mint request so crashes are recoverable
-- `tokens/0000.txt` … — one V4-encoded `cashuB…` token per file, each exactly one proof of `--amount` sats
+| Flag | Value |
+|---|---|
+| `--mint` | Cashu mint URL (e.g. `https://testnut.cashu.space`) |
+| `--count` | Number of tokens to mint (1–200) |
 
-## Safety model
+Optional flags:
 
-1. All pre-flight checks happen before any mint call that could cost money.
-2. `prepareMint` is local-only; the `MintPreview` is written to disk before the mint HTTP call.
-3. On crash after paying the invoice, run `./bin/mint-batch resume <run-dir>` — it replays `completeMint` with the persisted preview. Cashu NUT-19 mints cache responses so retries return identical signatures.
-4. The tool refuses to mint at denominations the mint doesn't support, and caps batch size at 200 outputs per run.
+| Flag | Default | Notes |
+|---|---|---|
+| `--amount` | `8192` | Per-token denomination in the chosen unit. Must be a power of 2 the mint supports. |
+| `--unit` | `sat` | Mint unit. |
+| `--out` | `./runs` | Parent directory for run folders. |
+| `--poll-interval` | `2000` | Milliseconds between quote-state polls. |
+| `--quiet` | off | Suppress banner / invoice QR output. |
 
-## Resume
+Each invocation creates a new subdirectory under `--out`, prints a BOLT11 invoice (plus a terminal QR for scanning with a mobile wallet), polls the mint until paid, then writes one token per file.
+
+### Resume an interrupted run
 
 ```bash
-./bin/mint-batch resume ./runs/2026-04-23T18-42-01-000Z-testnut.cashu.space
+./bin/mint-batch resume <run-dir> [--poll-interval 2000]
 ```
 
-## QR codes
+Picks up a run dir that didn't finish. Handles three cases automatically:
 
-Convert a run's tokens into QR code images:
+- Invoice was never paid → re-prints the invoice and keeps polling.
+- Invoice paid, mint HTTP call never completed → replays the mint request.
+- Run already finished → no-op, prints a message.
+
+### Output layout
+
+```
+runs/<ISO-timestamp>-<mint-host>/
+├── manifest.json        # run config, mint info, quote, state machine, completion timestamp
+├── preview.json         # blinded outputs for recovery (present after payment, until tokens written)
+└── tokens/
+    ├── 0000.txt         # one cashuB… token per file; each is exactly one proof of --amount
+    ├── 0001.txt
+    └── …
+```
+
+After QR generation, a `qr/` subdirectory is added alongside `tokens/`.
+
+### Pre-flight rules
+
+Before any network call that commits money, `mint-batch` checks:
+
+- `count` is in `[1, 200]` (for larger batches, run it multiple times)
+- `amount` is a positive power of 2
+- The mint advertises `bolt11` for the chosen unit
+- The mint has an active keyset that supports `amount` at `unit`
+- `count × amount` is within the mint's advertised max (if present)
+
+If the mint does not advertise NUT-19 (cached responses), a visible warning is printed because recovery from a mid-request crash is not possible on such mints.
+
+## `tokens-to-qr`
+
+```bash
+./bin/tokens-to-qr <run-dir> [options]
+```
+
+Reads all `tokens/*.txt` in the run dir and writes one QR image per token to `<run-dir>/qr/` (or `--out <dir>` if given). Writes `qr-manifest.json` recording the config used.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--prefix` | *(empty)* | Prepend a URL to each token. Example: `'https://agi.cash/receive-cashu-token#<token>'` — the `#` fragment keeps the token client-side, so scanning opens the receive page in a browser with the token in the URL. |
+| `--format` | `png` | `png` or `svg`. |
+| `--ec-level` | `M` | Error correction level: `L` (7%), `M` (15%), `Q` (25%), `H` (30%). |
+| `--size` | `512` | PNG size in px per side. Ignored for `svg` (vectors scale infinitely). |
+| `--margin` | `2` | Quiet-zone width in modules. |
+| `--out` | `<run-dir>/qr` | Output directory. |
+
+Output filenames match the source token filenames (`0000.png` corresponds to `tokens/0000.txt`).
+
+## Common recipes
+
+### Mint 50 tokens for printing
+
+```bash
+./bin/mint-batch --mint https://YOUR.mint.url --count 50
+./bin/tokens-to-qr ./runs/<run-dir> \
+  --prefix 'https://agi.cash/receive-cashu-token#' \
+  --format png
+# PNG cards land in ./runs/<run-dir>/qr/
+```
+
+### High-contrast SVG for professional printing
 
 ```bash
 ./bin/tokens-to-qr ./runs/<run-dir> \
   --prefix 'https://agi.cash/receive-cashu-token#' \
-  --format png                      # or svg
-  --ec-level M                      # L|M|Q|H, default M
-  --size 512                        # px per side for PNG
+  --format svg \
+  --ec-level Q \
+  --margin 4
 ```
 
-Output goes to `<run-dir>/qr/0000.png` … one per source token, plus `qr-manifest.json` recording the config used.
+### Mint, then immediately render a single "smaller" QR run (no URL prefix)
 
-The `qrcode` library auto-picks the smallest QR version that fits. Run `bun run scripts/verify-qr.ts <run-dir> [prefix]` to see the resulting version/module count for your specific tokens + prefix.
+```bash
+./bin/mint-batch --mint https://YOUR.mint.url --count 10
+./bin/tokens-to-qr ./runs/<run-dir>
+# QR codes contain just the cashuB… string — any Cashu-aware scanner can read them.
+```
 
-## Tested against
+### Against the free testnet mint (auto-pays invoices)
 
-- `https://testnut.cashu.space` (Nutshell 0.20.0) — produces valid 8192-sat tokens, happy path + resume-after-simulated-crash both work.
-- Tokens are written without DLEQ by default (`getEncodedTokenV4(token, true)`) so QR codes stay in the scannable size range. If you need DLEQ for receiver-side mint-verification, re-mint after editing `src/mint.ts`.
+```bash
+./bin/mint-batch --mint https://testnut.cashu.space --count 5
+./bin/tokens-to-qr ./runs/<run-dir> --prefix 'https://agi.cash/receive-cashu-token#'
+```
 
-## Scripts
+## Verification scripts
 
-- `bun run scripts/verify.ts <run-dir>` — decode every token in a run, check uniqueness and sum.
-- `bun run scripts/make-partial-run.ts [mintUrl]` — create a partial run (quote created but not minted) to exercise `resume`.
-- `bun run scripts/verify-qr.ts <run-dir> [prefix]` — confirm QR version/payload for the tokens in a run.
+These don't produce anything, they just sanity-check a run directory:
+
+| Command | What it checks |
+|---|---|
+| `bun run scripts/verify.ts <run-dir>` | Every token decodes; all secrets unique; amounts sum to manifest total. |
+| `bun run scripts/verify-qr.ts <run-dir> [prefix]` | Reports the QR version / module count / payload size that would be used for each token with this prefix. |
+| `bun run scripts/redeem-test.ts <run-dir>` | Actually swaps the first 3 tokens back with the mint to prove they're cryptographically valid unspent ecash. *This spends the tokens.* |
+| `bun run scripts/make-partial-run.ts [mintUrl]` | Creates a run directory in the "quote-created" state so you can exercise `mint-batch resume`. |
+
+## Capabilities at a glance
+
+- Pay **one** Lightning invoice → produce **N** uniformly-denominated single-proof tokens.
+- Fully configurable: mint URL, denomination, count, unit, output location.
+- Recoverable: crashes after payment resume via `mint-batch resume <run-dir>`.
+- Token output is portable: each `.txt` file is a self-contained `cashuB…` V4 token. Any Cashu wallet can redeem it.
+- QR images: per-token PNG or SVG, with optional URL prefix so the QR opens in a browser, putting the token in a `#fragment` for client-side receive flows.
+- No keys, no secrets, no config files — state lives entirely inside each run directory.
