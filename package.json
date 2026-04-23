@@ -1,0 +1,26 @@
+{
+  "name": "cashu-batch-mint",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pay one Lightning invoice to a Cashu mint and receive many single-proof ecash tokens of a fixed denomination.",
+  "bin": {
+    "mint-batch": "./bin/mint-batch",
+    "tokens-to-qr": "./bin/tokens-to-qr"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "typecheck": "bun run tsc --noEmit"
+  },
+  "dependencies": {
+    "@cashu/cashu-ts": "^3.6.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/qrcode": "^1.5.5",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.4.0"
+  }
+}

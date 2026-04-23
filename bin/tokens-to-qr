@@ -1,0 +1,113 @@
+#!/usr/bin/env bun
+import { runQr, type QrFormat, type QrEcLevel } from '../src/qr.ts';
+
+function usage(code: number): never {
+	console.error(
+		`Usage:
+  tokens-to-qr <run-dir> [options]
+
+Options:
+  --prefix <url>       Prepend a URL to each token (e.g. 'https://agi.cash/receive-cashu-token#')
+  --format png|svg     Output format (default: png)
+  --ec-level L|M|Q|H   Error correction (default: M)
+  --size <px>          PNG size per side (default: 512; ignored for svg)
+  --margin <modules>   Quiet zone in modules (default: 2)
+  --out <dir>          Output directory (default: <run-dir>/qr)
+
+Produces <out>/0000.{png,svg} matching the source tokens/0000.txt names, plus qr-manifest.json.
+`,
+	);
+	process.exit(code);
+}
+
+function parseInt1(raw: string | undefined, name: string): number {
+	if (raw == null) throw new Error(`missing value for --${name}`);
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n <= 0) {
+		throw new Error(`--${name} must be a positive integer, got "${raw}"`);
+	}
+	return n;
+}
+
+async function main(): Promise<void> {
+	const argv = process.argv.slice(2);
+	if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') usage(0);
+
+	const runDir = argv[0];
+	if (runDir.startsWith('--')) {
+		throw new Error('First argument must be a run directory');
+	}
+
+	let prefix = '';
+	let format: QrFormat = 'png';
+	let ecLevel: QrEcLevel = 'M';
+	let sizePx = 512;
+	let marginModules = 2;
+	let outDir: string | undefined;
+
+	for (let i = 1; i < argv.length; i++) {
+		switch (argv[i]) {
+			case '--prefix':
+				prefix = argv[++i];
+				break;
+			case '--format': {
+				const f = argv[++i];
+				if (f !== 'png' && f !== 'svg') throw new Error(`--format must be png or svg, got "${f}"`);
+				format = f;
+				break;
+			}
+			case '--ec-level': {
+				const e = argv[++i];
+				if (e !== 'L' && e !== 'M' && e !== 'Q' && e !== 'H') {
+					throw new Error(`--ec-level must be L, M, Q, or H, got "${e}"`);
+				}
+				ecLevel = e;
+				break;
+			}
+			case '--size':
+				sizePx = parseInt1(argv[++i], 'size');
+				break;
+			case '--margin': {
+				const raw = argv[++i];
+				const n = Number(raw);
+				if (!Number.isInteger(n) || n < 0) {
+					throw new Error(`--margin must be a non-negative integer, got "${raw}"`);
+				}
+				marginModules = n;
+				break;
+			}
+			case '--out':
+				outDir = argv[++i];
+				break;
+			case '-h':
+			case '--help':
+				usage(0);
+			// eslint-disable-next-line no-fallthrough
+			default:
+				throw new Error(`Unknown flag: ${argv[i]}`);
+		}
+	}
+
+	const result = await runQr({
+		runDir,
+		prefix,
+		format,
+		ecLevel,
+		sizePx,
+		marginModules,
+		outDir,
+	});
+
+	console.log(
+		`✓ Wrote ${result.count} ${result.format.toUpperCase()} QR codes to ${result.outDir}`,
+	);
+	console.log(
+		`  Payload: ${result.dataLen} bytes per QR → QR version ${result.qrVersion}, EC level ${result.ecLevel}`,
+	);
+}
+
+main().catch((err) => {
+	console.error(`\nerror: ${(err as Error).message}`);
+	if (process.env.DEBUG) console.error(err);
+	process.exit(1);
+});
