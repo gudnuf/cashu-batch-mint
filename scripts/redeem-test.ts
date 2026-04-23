@@ -21,27 +21,24 @@ const tokenFiles = readdirSync(join(runDir, 'tokens'))
 	.sort();
 
 console.log(`Mint: ${manifest.mintUrl}`);
-console.log(`Testing ${Math.min(3, tokenFiles.length)} tokens from ${runDir}:\n`);
+console.log(`Testing ${Math.min(3, tokenFiles.length)} tokens from ${runDir} via wallet.receive():\n`);
 
 const { keysets } = await mint.getKeys();
 
+let totalReceived = 0;
 for (const tf of tokenFiles.slice(0, 3)) {
 	const tokenStr = readFileSync(join(runDir, 'tokens', tf), 'utf8').trim();
 	const decoded = getDecodedToken(tokenStr, keysets);
 	const p = decoded.proofs[0];
-
-	// Check proof state via NUT-07 (UNSPENT = valid and unused)
-	const stateResp = await mint.check({ Ys: [] as string[], proofs: decoded.proofs } as never);
-	console.log(`${tf}: ${p.amount} ${decoded.unit}, mint sees state: ${JSON.stringify(stateResp)}`);
+	// A successful receive is proof that the mint accepted the proof as valid
+	// and unspent (it swaps it server-side for fresh proofs).
+	const newProofs = await wallet.receive(tokenStr);
+	const received = newProofs.reduce((s, pf) => s + pf.amount, 0);
+	const fee = p.amount - received;
+	totalReceived += received;
+	console.log(
+		`${tf}: presented=${p.amount} received=${received} fee=${fee} (${newProofs.length} new proof(s))`,
+	);
 }
+console.log(`\nOK: mint accepted and swapped all 3 tokens. Total received: ${totalReceived} ${manifest.unit}`);
 
-// Do an actual receive/swap on token 0 to prove the proofs spend cleanly.
-const firstTokenStr = readFileSync(join(runDir, 'tokens', tokenFiles[0]), 'utf8').trim();
-console.log(`\nAttempting wallet.receive on ${tokenFiles[0]}…`);
-const newProofs = await wallet.receive(firstTokenStr);
-console.log(
-	`✓ Received ${newProofs.length} new proof(s) totaling ${newProofs.reduce((s, p) => s + p.amount, 0)} ${manifest.unit}`,
-);
-console.log(
-	`  Mint issued fresh proofs for our token, confirming it was a valid unspent ecash note.`,
-);

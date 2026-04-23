@@ -1,6 +1,33 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import {
+	mkdirSync,
+	writeFileSync,
+	readFileSync,
+	existsSync,
+	renameSync,
+	openSync,
+	closeSync,
+	fsyncSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { OutputData, type MintPreview } from '@cashu/cashu-ts';
+
+// Atomic write: write to a uniquely named temp file in the same directory,
+// fsync it, then rename over the destination. POSIX rename is atomic, so
+// a reader sees either the old file or the complete new one — never a
+// truncated or half-written file. The fsync ensures the new bytes are on
+// disk before the rename is visible, so a crash can't leave the rename
+// pointing at unflushed data.
+function atomicWriteFile(destPath: string, content: string): void {
+	const tmp = `${destPath}.tmp.${process.pid}.${Date.now()}`;
+	writeFileSync(tmp, content, { encoding: 'utf8' });
+	const fd = openSync(tmp, 'r+');
+	try {
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(tmp, destPath);
+}
 
 export type RunState =
 	| 'preflight-complete'
@@ -49,21 +76,30 @@ function timestampSegment(d: Date): string {
 
 export function createRunDir(parentDir: string, mintUrl: string, now = new Date()): string {
 	mkdirSync(parentDir, { recursive: true });
-	const name = `${timestampSegment(now)}-${safeHostSegment(mintUrl)}`;
-	const path = join(parentDir, name);
-	mkdirSync(path, { recursive: false });
-	mkdirSync(join(path, 'tokens'), { recursive: false });
-	return path;
+	const baseName = `${timestampSegment(now)}-${safeHostSegment(mintUrl)}`;
+	// Same-millisecond collisions are rare but possible (e.g. scripted loops).
+	// Try the base name first, then append -1, -2, ... until mkdir succeeds.
+	for (let suffix = 0; suffix < 1000; suffix++) {
+		const name = suffix === 0 ? baseName : `${baseName}-${suffix}`;
+		const path = join(parentDir, name);
+		try {
+			mkdirSync(path, { recursive: false });
+			mkdirSync(join(path, 'tokens'), { recursive: false });
+			return path;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+		}
+	}
+	throw new Error(`Could not create a unique run dir under ${parentDir} after 1000 attempts`);
 }
 
 const MANIFEST_FILE = 'manifest.json';
 const PREVIEW_FILE = 'preview.json';
 
 export function writeManifest(runDir: string, manifest: RunManifest): void {
-	writeFileSync(
+	atomicWriteFile(
 		join(runDir, MANIFEST_FILE),
 		JSON.stringify(manifest, null, 2) + '\n',
-		{ encoding: 'utf8' },
 	);
 }
 
@@ -132,10 +168,9 @@ function deserializePreview(s: SerializedMintPreview): MintPreview {
 }
 
 export function writePreview(runDir: string, preview: MintPreview): void {
-	writeFileSync(
+	atomicWriteFile(
 		join(runDir, PREVIEW_FILE),
 		JSON.stringify(serializePreview(preview), null, 2) + '\n',
-		{ encoding: 'utf8' },
 	);
 }
 
@@ -153,7 +188,7 @@ export function writeTokens(runDir: string, tokens: string[]): string[] {
 	const filenames: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const name = `${String(i).padStart(pad, '0')}.txt`;
-		writeFileSync(join(runDir, 'tokens', name), tokens[i] + '\n', { encoding: 'utf8' });
+		atomicWriteFile(join(runDir, 'tokens', name), tokens[i] + '\n');
 		filenames.push(`tokens/${name}`);
 	}
 	return filenames;

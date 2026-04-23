@@ -48,7 +48,7 @@ Convert a run's tokens into QR code images:
 
 Output goes to `<run-dir>/qr/0000.png` … one per source token, plus `qr-manifest.json` recording the config used.
 
-At `--amount 8192` tokens are 229 bytes; with the example URL prefix the full payload is 266 bytes → QR version 12 (65×65 modules, comfortable to scan from paper).
+The `qrcode` library auto-picks the smallest QR version that fits. Run `bun run scripts/verify-qr.ts <run-dir> [prefix]` to see the resulting version/module count for your specific tokens + prefix.
 
 ## Tested against
 

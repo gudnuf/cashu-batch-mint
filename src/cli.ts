@@ -26,16 +26,24 @@ function usage(exitCode: number): never {
   mint-batch resume <run-dir> [--poll-interval 2000]
 
 Notes:
-  * Max ${200} outputs per run. To mint more, run the script multiple times.
+  * Max 200 outputs per run. To mint more, run the script multiple times.
   * --amount must be a positive power of 2 matching a keyset on the mint.
-  * Each token is a single proof of the chosen amount, encoded as a V4 (cashuB...) token.
+  * Each token is a single proof of the chosen amount, encoded as a V4
+    (cashuB...) token with DLEQ stripped.
 `,
 	);
 	process.exit(exitCode);
 }
 
-function parseIntFlag(raw: string | undefined, name: string): number {
-	if (raw == null) throw new Error(`missing value for --${name}`);
+function requireNextArg(argv: string[], i: number, flag: string): string {
+	const v = argv[i + 1];
+	if (v == null || v.startsWith('--')) {
+		throw new Error(`--${flag} requires a value`);
+	}
+	return v;
+}
+
+function parseIntFlag(raw: string, name: string): number {
 	const n = Number(raw);
 	if (!Number.isInteger(n) || n <= 0) {
 		throw new Error(`--${name} must be a positive integer, got "${raw}"`);
@@ -55,22 +63,31 @@ function parseMintArgs(argv: string[]): CliOptions {
 		const a = argv[i];
 		switch (a) {
 			case '--mint':
-				opts.mintUrl = argv[++i];
+				opts.mintUrl = requireNextArg(argv, i, 'mint');
+				i++;
 				break;
 			case '--count':
-				opts.count = parseIntFlag(argv[++i], 'count');
+				opts.count = parseIntFlag(requireNextArg(argv, i, 'count'), 'count');
+				i++;
 				break;
 			case '--amount':
-				opts.amount = parseIntFlag(argv[++i], 'amount');
+				opts.amount = parseIntFlag(requireNextArg(argv, i, 'amount'), 'amount');
+				i++;
 				break;
 			case '--unit':
-				opts.unit = argv[++i];
+				opts.unit = requireNextArg(argv, i, 'unit');
+				i++;
 				break;
 			case '--out':
-				opts.outDir = argv[++i];
+				opts.outDir = requireNextArg(argv, i, 'out');
+				i++;
 				break;
 			case '--poll-interval':
-				opts.pollIntervalMs = parseIntFlag(argv[++i], 'poll-interval');
+				opts.pollIntervalMs = parseIntFlag(
+					requireNextArg(argv, i, 'poll-interval'),
+					'poll-interval',
+				);
+				i++;
 				break;
 			case '--quiet':
 				opts.quiet = true;
@@ -93,15 +110,17 @@ async function main(): Promise<void> {
 	if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') usage(0);
 
 	if (argv[0] === 'resume') {
+		if (argv.length < 2 || argv[1] === '-h' || argv[1] === '--help') usage(argv.length < 2 ? 2 : 0);
 		const runDir = argv[1];
-		if (!runDir) {
-			console.error('resume: missing <run-dir>');
-			usage(2);
-		}
 		let pollIntervalMs = DEFAULTS.pollIntervalMs;
 		for (let i = 2; i < argv.length; i++) {
+			if (argv[i] === '-h' || argv[i] === '--help') usage(0);
 			if (argv[i] === '--poll-interval') {
-				pollIntervalMs = parseIntFlag(argv[++i], 'poll-interval');
+				pollIntervalMs = parseIntFlag(
+					requireNextArg(argv, i, 'poll-interval'),
+					'poll-interval',
+				);
+				i++;
 			} else {
 				throw new Error(`Unknown flag for resume: ${argv[i]}`);
 			}

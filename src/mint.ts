@@ -1,10 +1,8 @@
 import {
 	Wallet,
-	getEncodedTokenV4,
 	MintQuoteState,
 	type MintQuoteBolt11Response,
 	type Proof,
-	type Token,
 } from '@cashu/cashu-ts';
 import qrcodeTerminal from 'qrcode-terminal';
 import { preflight } from './preflight.ts';
@@ -12,9 +10,9 @@ import {
 	createRunDir,
 	writeManifest,
 	writePreview,
-	writeTokens,
 	type RunManifest,
 } from './runDir.ts';
+import { encodeAndFinalize } from './tokens.ts';
 
 export interface RunMintOptions {
 	mintUrl: string;
@@ -61,18 +59,6 @@ async function pollUntilPaid(
 	}
 }
 
-function encodeSingleProofTokens(mintUrl: string, unit: string, proofs: Proof[]): string[] {
-	return proofs.map((proof) => {
-		const token: Token = {
-			mint: mintUrl,
-			proofs: [proof],
-			unit,
-		};
-		// removeDleq=true → smaller tokens, more scannable QR codes.
-		return getEncodedTokenV4(token, true);
-	});
-}
-
 export async function runMint(opts: RunMintOptions): Promise<string> {
 	// --- Preflight (no money at risk) ---
 	const { mint, keysetId, mintInfo, totalAmount } = await preflight(
@@ -84,7 +70,9 @@ export async function runMint(opts: RunMintOptions): Promise<string> {
 
 	// --- Run directory ---
 	const runDir = createRunDir(opts.outDir, opts.mintUrl);
-	const manifest: RunManifest = {
+	const info = mintInfo as { name?: string; version?: string; nuts?: Record<string, unknown> };
+	const nut19Supported = Boolean(info.nuts?.['19']);
+	let manifest: RunManifest = {
 		version: 1,
 		createdAt: new Date().toISOString(),
 		state: 'preflight-complete',
@@ -95,36 +83,49 @@ export async function runMint(opts: RunMintOptions): Promise<string> {
 		totalAmount,
 		keysetId,
 		mintInfo: {
-			name: (mintInfo as { name?: string }).name,
-			version: (mintInfo as { version?: string }).version,
-			nut19Supported: Boolean((mintInfo as { nuts?: Record<string, unknown> }).nuts?.['19']),
+			name: info.name,
+			version: info.version,
+			nut19Supported,
 		},
 	};
 	writeManifest(runDir, manifest);
 
 	if (!opts.quiet) {
-		console.log(`→ Run directory: ${runDir}`);
-		console.log(`  Mint: ${opts.mintUrl}`);
-		console.log(`  Keyset: ${keysetId}`);
-		console.log(`  Producing ${opts.count} × ${formatSats(opts.amount)} ${opts.unit} = ${formatSats(totalAmount)} ${opts.unit}`);
+		console.log(`-> Run directory: ${runDir}`);
+		console.log(`   Mint: ${opts.mintUrl}`);
+		console.log(`   Keyset: ${keysetId}`);
+		console.log(
+			`   Producing ${opts.count} x ${formatSats(opts.amount)} ${opts.unit} = ${formatSats(totalAmount)} ${opts.unit}`,
+		);
+		if (!nut19Supported) {
+			console.log(
+				`   [!] WARNING: mint does NOT advertise NUT-19 (cached responses). If this\n` +
+					`       process crashes during the mint HTTP call, 'mint-batch resume' will fail\n` +
+					`       and the invoice payment is UNRECOVERABLE. Only safe for testnet or\n` +
+					`       trivial amounts.`,
+			);
+		}
 	}
 
 	// --- Create wallet + mint quote ---
 	const wallet = new Wallet(mint, { unit: opts.unit });
 	await wallet.loadMint();
 	const quote = await wallet.createMintQuoteBolt11(totalAmount);
-	manifest.state = 'quote-created';
-	manifest.quote = {
-		quote: quote.quote,
-		request: quote.request,
-		expiry: quote.expiry,
-		state: quote.state,
+	manifest = {
+		...manifest,
+		state: 'quote-created',
+		quote: {
+			quote: quote.quote,
+			request: quote.request,
+			expiry: quote.expiry,
+			state: quote.state,
+		},
 	};
 	writeManifest(runDir, manifest);
 
 	// --- Display invoice + QR ---
 	if (!opts.quiet) {
-		console.log('\n─── Lightning invoice (pay to mint) ───');
+		console.log('\n--- Lightning invoice (pay to mint) ---');
 		const qrArt = await renderQr(quote.request.toUpperCase());
 		console.log(qrArt);
 		console.log(quote.request);
@@ -132,7 +133,7 @@ export async function runMint(opts: RunMintOptions): Promise<string> {
 		if (quote.expiry) {
 			console.log(`Expires: ${new Date(quote.expiry * 1000).toISOString()}`);
 		}
-		console.log('\nPolling mint for payment…');
+		console.log('\nPolling mint for payment...');
 	}
 
 	// --- Poll for payment ---
@@ -145,12 +146,18 @@ export async function runMint(opts: RunMintOptions): Promise<string> {
 	});
 	if (paidQuote.state === MintQuoteState.ISSUED) {
 		throw new Error(
-			`Quote ${quote.quote} is already in ISSUED state — signatures were already minted ` +
+			`Quote ${quote.quote} is already in ISSUED state - signatures were already minted ` +
 				`for this quote by another process. Cannot recover without the original preview.`,
 		);
 	}
+	// Record the updated state (so manifest reflects reality, not the stale UNPAID).
+	manifest = {
+		...manifest,
+		quote: { ...manifest.quote!, state: paidQuote.state },
+	};
+	writeManifest(runDir, manifest);
 
-	// --- Prepare mint (local) ---
+	// --- Prepare mint (local, no network) ---
 	const denominations: number[] = Array<number>(opts.count).fill(opts.amount);
 	const preview = await wallet.prepareMint('bolt11', totalAmount, paidQuote, { keysetId }, {
 		type: 'random',
@@ -159,38 +166,20 @@ export async function runMint(opts: RunMintOptions): Promise<string> {
 
 	// --- Persist preview BEFORE hitting the mint ---
 	writePreview(runDir, preview);
-	manifest.state = 'preview-written';
+	manifest = { ...manifest, state: 'preview-written' };
 	writeManifest(runDir, manifest);
 
-	// --- Complete mint (network; NUT-19 idempotent retries safe) ---
+	// --- Complete mint (network; NUT-19 idempotent retries safe when supported) ---
 	const proofs: Proof[] = await wallet.completeMint(preview);
-	if (proofs.length !== opts.count) {
-		throw new Error(
-			`Mint returned ${proofs.length} proofs, expected ${opts.count}. ` +
-				`Preview preserved at ${runDir}/preview.json for manual recovery.`,
-		);
-	}
-	for (const p of proofs) {
-		if (p.amount !== opts.amount) {
-			throw new Error(
-				`Mint returned a proof of ${p.amount} when ${opts.amount} was requested. ` +
-					`Preview preserved at ${runDir}/preview.json.`,
-			);
-		}
-	}
 
-	// --- Encode + write tokens ---
-	const tokens = encodeSingleProofTokens(opts.mintUrl, opts.unit, proofs);
-	const filenames = writeTokens(runDir, tokens);
-
-	manifest.state = 'complete';
-	manifest.completedAt = new Date().toISOString();
-	manifest.tokenFilenames = filenames;
-	writeManifest(runDir, manifest);
+	// --- Assertions + encode + write tokens + finalize manifest (shared helper) ---
+	const { tokens } = encodeAndFinalize(runDir, manifest, proofs);
 
 	if (!opts.quiet) {
-		console.log(`\n✓ Minted ${tokens.length} tokens of ${formatSats(opts.amount)} ${opts.unit} each`);
-		console.log(`  Directory: ${runDir}/tokens`);
+		console.log(
+			`\nOK Minted ${tokens.length} tokens of ${formatSats(opts.amount)} ${opts.unit} each`,
+		);
+		console.log(`   Directory: ${runDir}/tokens`);
 	}
 	return runDir;
 }
