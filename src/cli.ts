@@ -7,8 +7,8 @@ interface CliOptions {
 	count: number;
 	unit: string;
 	outDir: string;
-	pollIntervalMs: number;
 	quiet: boolean;
+	json: boolean;
 }
 
 const DEFAULTS = {
@@ -22,14 +22,20 @@ function usage(exitCode: number): never {
 	console.error(
 		`Usage:
   mint-batch --mint <url> --count <n> [--amount 8192] [--unit sat]
-             [--out ./runs] [--poll-interval 2000] [--quiet]
+             [--out ./runs] [--quiet] [--json]
   mint-batch resume <run-dir> [--poll-interval 2000]
+
+The default 'mint-batch' flow creates the mint quote, prints the Lightning
+invoice (with a terminal QR), and exits. After paying, run 'mint-batch resume
+<run-dir>' to poll the mint and issue the tokens.
 
 Notes:
   * Max 200 outputs per run. To mint more, run the script multiple times.
   * --amount must be a positive power of 2 matching a keyset on the mint.
   * Each token is a single proof of the chosen amount, encoded as a V4
     (cashuB...) token with DLEQ stripped.
+  * --json prints a single JSON object describing the quote to stdout (useful
+    for agent workflows that need to parse the invoice string).
 `,
 	);
 	process.exit(exitCode);
@@ -56,8 +62,8 @@ function parseMintArgs(argv: string[]): CliOptions {
 		amount: DEFAULTS.amount,
 		unit: DEFAULTS.unit,
 		outDir: DEFAULTS.outDir,
-		pollIntervalMs: DEFAULTS.pollIntervalMs,
 		quiet: false,
+		json: false,
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
@@ -82,14 +88,12 @@ function parseMintArgs(argv: string[]): CliOptions {
 				opts.outDir = requireNextArg(argv, i, 'out');
 				i++;
 				break;
-			case '--poll-interval':
-				opts.pollIntervalMs = parseIntFlag(
-					requireNextArg(argv, i, 'poll-interval'),
-					'poll-interval',
-				);
-				i++;
-				break;
 			case '--quiet':
+				opts.quiet = true;
+				break;
+			case '--json':
+				opts.json = true;
+				// JSON output implies quiet so the payload is the only thing on stdout.
 				opts.quiet = true;
 				break;
 			case '-h':
@@ -130,7 +134,10 @@ async function main(): Promise<void> {
 	}
 
 	const opts = parseMintArgs(argv);
-	await runMint(opts);
+	const result = await runMint(opts);
+	if (opts.json) {
+		console.log(JSON.stringify(result, null, 2));
+	}
 }
 
 main().catch((err) => {
